@@ -1,96 +1,78 @@
-# SimiCheck Academic — pemeriksa kemiripan akademik berbasis korpus
+# SimiCheck Academic
 
-Aplikasi web Streamlit dengan unggah PDF/DOCX/TXT, sumber jurnal berlisensi open-access via OpenAlex (full-text GROBID XML), database sumber permanen di Supabase, highlight kemiripan kata, kontribusi per sumber, dan ekspor laporan HTML. **Bukan Turnitin** dan **bukan mesin penentu plagiarisme**.
+Pemeriksa kemiripan dokumen akademik berbasis Streamlit. Bandingkan proposal, skripsi, atau dokumen lain dengan koleksi privat, artikel open-access yang ditemukan melalui OpenAlex, atau gabungan kedua sumber.
 
-## 1. Jalankan secara lokal untuk uji
+## Jalankan secara lokal
 
-Python versi 3.10+ disarankan.
+Gunakan Python 3.12 atau 3.13.
 
-```bash
+```powershell
 python -m venv .venv
-# Windows:
-.venv\Scripts\activate
-# macOS/Linux:
-# source .venv/bin/activate
-pip install -r requirements.txt
-streamlit run app.py
+.venv\Scripts\python -m pip install -r requirements.txt
+.venv\Scripts\python -m streamlit run app.py
 ```
 
-Tanpa Secrets, aplikasi otomatis memakai SQLite lokal `local_sources.sqlite3`; file ini **tidak** cocok untuk penyimpanan permanen pada layanan cloud gratis.
+Pada macOS atau Linux, gunakan `.venv/bin/python`. Mode lokal memakai `local_sources.sqlite3` saat konfigurasi Supabase kosong. Tanpa kata sandi aplikasi, pakai mode ini hanya pada perangkat sendiri.
 
-Untuk menguji engine tanpa layanan luar:
+## Konfigurasi Supabase dan Streamlit Community Cloud
 
-```bash
-python -m unittest discover -s tests -v
+1. Untuk database baru, jalankan [schema.sql](schema.sql) di Supabase SQL Editor. Aplikasi memakai tabel `public.sources` dengan Row Level Security.
+2. Pada instalasi yang sudah berjalan, pertahankan tabel dan data jurnal yang ada. [Skrip izin opsional](migrations/001_sources_access.sql) menghapus hak langsung untuk peran `anon` dan `authenticated` pada tabel sumber dan memberi backend operasi baca, tambah, dan hapus. Tinjau pemakai tabel lain sebelum menjalankannya. Skrip hanya mengubah hak akses.
+3. Gunakan entry point `app.py` dan Python 3.12 atau 3.13 di Streamlit Community Cloud. `requirements.txt` berisi paket Python. `packages.txt` memasang font DejaVu untuk PDF.
+4. Masukkan konfigurasi di **Streamlit Secrets** untuk deployment. Untuk pengembangan lokal, gunakan variabel lingkungan atau `.streamlit/secrets.toml` yang diabaikan Git.
+
+| Nama konfigurasi | Kegunaan |
+|---|---|
+| `APP_PASSWORD` | Wajib bersama Supabase. Gunakan kata sandi kuat yang disimpan pada server. |
+| `SUPABASE_URL` | URL proyek Supabase melalui HTTPS. |
+| `SUPABASE_SECRET_KEY` | Kunci rahasia backend. Instalasi lama juga dapat memakai `SUPABASE_SERVICE_ROLE_KEY`. |
+| `OPENALEX_API_KEY` | Aktifkan pencarian dan unduhan XML dari OpenAlex. |
+| `SIMICHECK_SEMANTIC` | Opsional. Nilai `true` menampilkan pilihan parafrase eksperimental. |
+
+Simpan API key dan kata sandi di pengaturan server. Hindari memasukkan laporan, file sumber privat, database lokal, dan model unduhan ke Git. Aktifkan visibilitas privat di Community Cloud untuk membatasi siapa yang dapat menjangkau aplikasi. Kata sandi bersama memberi akses koleksi yang sama kepada pemegangnya. Untuk penggunaan kampus dengan pemisahan per pengguna, gunakan rancangan Supabase Auth, identitas pengguna, dan kebijakan akses per baris.
+
+## Alur penggunaan
+
+- **Dasbor** menampilkan sumber terbaru dan hasil pemeriksaan yang tersedia pada sesi aktif.
+- **Koleksi sumber** menerima PDF, DOCX, dan TXT. Tinjau nama, ukuran, status, serta duplikat SHA-256, lalu pilih file yang akan diimpor. Batasnya 15 MB per file dan 12 file atau 45 MB per batch. Hasil impor ditampilkan per file. Koleksi dapat dicari, diurutkan, difilter, dan dihapus dengan konfirmasi.
+- **Jelajahi OpenAlex** mencari artikel untuk diimpor ke koleksi. Mode **OpenAlex otomatis** di halaman **Periksa kemiripan** mengambil XML berlisensi langsung untuk satu pemeriksaan. Tinjau kata kunci hasil ekstraksi lokal dan setujui pengirimannya sebelum menjalankan pencarian otomatis. Teks dokumen dan embedding tetap diproses di server aplikasi.
+- **Periksa kemiripan** menerima satu dokumen, kemudian meminta pengguna memilih mode dan ambang pencocokan. Pilihan koleksi memuat hingga 300 metadata terbaru dan hanya mengambil teks dari maksimal 12 sumber terpilih. Sejumlah kandidat dapat dilewati berdasarkan lisensi, ketersediaan isi, atau batas pemrosesan. Hasil mencantumkan jumlah sumber yang diperiksa dan pesan cakupan.
+- **Laporan** menampilkan skor, jumlah kata, pengecualian, waktu WITA, daftar sumber, dan bukti yang bisa ditinjau. PDF A4 dan HTML memuat teks dokumen dengan sorotan. CSV berisi daftar sumber dan JSON berisi ringkasan serta pasangan bukti. Untuk laporan besar, PDF menampilkan hingga 150 pasangan detail. Teks dan sorotan tetap lengkap. HTML dan JSON mencantumkan semua pasangan.
+- **Pengaturan** menampilkan status konfigurasi dan menyediakan penghapusan dokumen serta laporan dari sesi. Keluar juga membersihkan state sesi. Pemeriksaan tidak menulis dokumen ke database. Impor ke koleksi menyimpan teks sumber setelah dikonfirmasi.
+
+## Cara membaca hasil
+
+**Kemiripan teks langsung (%) = token dokumen yang tercakup oleh kecocokan valid ? token yang dianalisis ? 100.** N-gram membandingkan urutan kata Unicode dan memprioritaskan rentang yang lebih panjang. Setiap token memperoleh paling banyak satu atribusi. Ambang dan pengecualian pada laporan membantu menjelaskan perbedaan antarpemeriksaan.
+
+Indikasi parafrase menggunakan model multibahasa E5 Small terkuantisasi. Bobot model publik diunduh pertama kali, diperiksa dengan SHA-256, dan disimpan dalam `.simicheck-models/`. Dokumen tidak dikirim ke penyedia model. Fitur mengambil paling banyak 64 segmen dokumen dan 120 segmen sumber. Laporan mencantumkan jumlah segmen yang disampel dan skor kosinus untuk setiap pasangan. Temuan semantik dihitung terpisah dari persentase teks langsung. Fitur ini tetap eksperimental karena kalimat bertopik sama dapat melebihi ambang.
+
+Skor berlaku untuk sumber yang benar-benar diperiksa. Turnitin memiliki korpus dan metode penilaian sendiri. Gunakan bukti pencocokan, konteks, dan sitasi untuk menilai temuan. PDF hasil pindai memerlukan OCR terlebih dahulu. SimiCheck menyampaikan kondisi tanpa sumber yang dapat dibandingkan melalui status pemeriksaan.
+
+## Lisensi dan batas pemrosesan
+
+- OpenAlex menyediakan metadata lisensi dan lokasi. Pemeriksaan memilih CC BY, CC BY-SA, CC0, atau penanda domain publik yang tercantum. XML yang menyatakan lisensi Creative Commons yang bertentangan dilewati. Laporan menyertakan judul, tautan, lisensi, dan atribut lain sejauh tersedia. Izin penggunaan mengikuti lisensi artikel. [OpenAlex Fulltext](https://help.openalex.org/access/fulltext/) dan [Creative Commons](https://creativecommons.org/share-your-work/use-remix/cc-licenses/).
+- Setiap pemeriksaan otomatis menggunakan hingga tiga kueri dan tiga kandidat unduhan. Percobaan ulang HTTP dibatasi. Aplikasi memiliki batas proses harian 150 percobaan kueri dan 75 percobaan unduhan UTC, dengan kuota akun tetap ditegakkan oleh OpenAlex. Batas lokal dimulai ulang bersama proses server. [Biaya dan kuota OpenAlex](https://help.openalex.org/access/example-costs/).
+- Batas pemeriksaan adalah 40.000 token dokumen dan 250.000 token sumber. PDF dibatasi 400 halaman. Satu pemeriksaan berjalan per proses agar penggunaan RAM tetap terkendali. Cache artikel publik dibatasi 16 entri dan 30 menit. Cache metadata koleksi dibatasi per sesi. Model semantik dimuat hanya ketika dijalankan.
+- Periksa performa dengan dokumen dan tingkat penggunaan yang mewakili kondisi Anda. Resource Community Cloud dapat berubah. [Batas Streamlit Community Cloud](https://docs.streamlit.io/deploy/streamlit-community-cloud/manage-your-app).
+
+## Pengujian
+
+```powershell
+.venv\Scripts\python -B -m unittest discover -s tests -v
 ```
 
-## 2. Buat database sumber persisten (Supabase)
+GitHub Actions menjalankan pengujian pada Python 3.12 dan 3.13 tanpa kredensial. Tes mencakup N-gram dan pengecualian, format file, SQLite, respons tiruan Supabase dan OpenAlex, alur Streamlit, serta ekspor. Model dapat disiapkan untuk pengujian lokal dengan `python -m semantic`.
 
-1. Buat proyek gratis di https://supabase.com/.
-2. Buka **SQL Editor**, salin seluruh isi `schema.sql`, lalu jalankan.
-3. Dari **Project Settings → API Keys**, ambil `sb_secret_...` (**secret key, bukan publishable key**) dan **Project URL** yang formatnya `https://PROJECT.supabase.co`.
-4. Jangan masukkan secret key ke repository, HTML, JavaScript frontend, atau file publik.
-5. Database gratis bisa dijeda oleh Supabase jika tidak aktif cukup lama. Cadangkan data penting.
+| Fase | Cara menguji manual |
+|---|---|
+| Audit dan arsitektur | Jalankan aplikasi dengan SQLite sementara. Periksa login, koleksi, pemeriksaan, dan hasil ekspor pada dokumen uji. |
+| Fondasi UI | Gunakan Tab dan Enter untuk login, pindah halaman, dan keluar. Coba kata sandi yang salah. Uji pada lebar ponsel, pembesaran browser, dan pembaca layar sebelum publikasi. |
+| Unggahan dan koleksi | Pilih satu TXT valid, satu salinan, dan satu file rusak. Keluarkan satu file dari pilihan, konfirmasi impor, lalu periksa hasil, filter, pagination, dan konfirmasi hapus. |
+| Pemeriksaan | Unggah dokumen yang diketahui ada kecocokannya. Uji masing-masing mode, opsi daftar pustaka dan kutipan, serta kasus koleksi kosong atau OpenAlex gagal. |
+| Laporan dan ekspor | Pilih beberapa pasangan bukti dari sumber berbeda. Unduh keempat format. Buka PDF multi-halaman dan PDF 0%, lalu cocokkan statistik, tautan, dan sorotan dengan tampilan. |
+| Privasi dan performa | Hapus dokumen dari sesi dan masuk kembali. Pada deployment uji, ukur waktu dan memori dengan beberapa sesi, cek hak akses Supabase, kuota OpenAlex, dan kondisi setelah app mulai ulang. |
 
-## 3. Daftar OpenAlex API key gratis
-
-1. Daftar/login di https://openalex.org/ dan aktifkan API key.
-2. Gunakan `OPENALEX_API_KEY` di Secrets. Free tier memiliki kuota harian.
-3. Dalam aplikasi, cari topik. Pilih artikel yang **memiliki lisensi CC BY, CC BY-SA, atau CC0** dan GROBID XML lengkap, lalu impor (maks. lima per sekali impor).
-4. Artikel open-access yang sekadar dapat dibaca gratis **tidak otomatis** boleh disalin atau diindeks; aplikasi memakai daftar lisensi konservatif. Metadata dan hasil parsing harus ditinjau untuk publikasi/layanan komersial.
-
-## 4. Deploy gratis di Streamlit Community Cloud
-
-1. Buat repository **privat** baru di GitHub https://github.com/new.
-2. Upload seluruh isi folder proyek (struktur folder dipertahankan), **kecuali** file `.env`, `.streamlit/secrets.toml`, atau `*.sqlite3`.
-3. Buka https://share.streamlit.io/, masuk dengan GitHub, pilih **Create app** → repository → branch `main` → main file `app.py`.
-4. Masukkan Secrets berikut dalam Advanced settings / App settings. **Ganti semua placeholder.**
-
-```toml
-APP_PASSWORD = "GANTI_DENGAN_SANDI_YANG_PANJANG"
-SUPABASE_URL = "https://NAMA-PROJEK.supabase.co"
-SUPABASE_SECRET_KEY = "sb_secret_ISI_DARI_DASHBOARD"
-OPENALEX_API_KEY = "ISI_API_KEY_OPENALEX"
-```
-
-5. Deploy. Website mendapat URL `https://nama-app.streamlit.app` sesuai nama yang tersedia.
-6. Atur visibilitas app **private** di Streamlit App Settings bila tersedia, atau wajibkan `APP_PASSWORD`. Untuk penggunaan multiuser skala besar, tambahkan autentikasi masing-masing pengguna dan kebijakan isolasi data.
-
-**Mengapa Streamlit, bukan Vercel?** Proses PDF dan pencocokan teks lebih sesuai pada aplikasi Python dengan sumber daya yang tetap hidup selama permintaan. Streamlit Community Cloud bisa tidur ketika tidak diakses; pengguna bisa membangunkannya melalui halaman aplikasi. Kamu tidak perlu menyalakan laptop. Supabase Free juga bisa mengalami jeda karena inaktivitas.
-
-## 5. Alur pemakaian
-
-1. Tab **Koleksi sumber**: unggah PDF/DOCX jurnal yang kamu gunakan atau punya hak pakai; di sini teks diekstrak dan disimpan.
-2. Tab **Cari jurnal open-access**: cari topik, pilih hasil berlisensi kompatibel dan impor full-text (bukan abstrak saja).
-3. Tab **Cek dokumen**: unggah proposal, pilih sumber, atur ambang minimum kesamaan kata, pilih pengecualian daftar pustaka/kutipan.
-4. Lihat skor, daftar sumber dan bagian yang diberi highlight, lalu unduh laporan HTML. Di browser buka HTML → Print → Save as PDF.
-
-## 6. Cara perhitungan dan keterbatasan
-
-- Teks difragmentasi menjadi token kata Unicode dalam urutan semula.
-- N-gram berurutan dari korpus jurnal diindeks untuk mencari frasa dokumen yang sama persis.
-- Pasangan frasa diperpanjang sampai kata yang tidak lagi sama dan diprioritaskan dari yang terpanjang.
-- Setiap kata dokumen hanya dihitung sekali. **Similarity % = jumlah kata cocok unik / jumlah kata dokumen yang ikut dihitung × 100**.
-- Daftar pustaka dapat dikecualikan dari titik heading yang cocok; opsi kutipan mengabaikan teks dalam tanda kutip, tidak otomatis mengenali semua gaya sitasi.
-- Sistem **tidak** mampu mencari seluruh internet atau database privat Turnitin. Skor dapat rendah karena kurangnya sumber, bukan karena pasti orisinal.
-- Tidak mendeteksi parafrase atau plagiarisme lintas bahasa. Perlu modul semantik terpisah dan validasi agar tidak menghasilkan false positive.
-- Batas awal: 15 MB per file, 400 halaman per PDF, 300 sumber ditampilkan/diambil, 1,5 juta token sumber per pemeriksaan agar ramah hosting gratis.
-- Teks PDF hasil scan tidak dibaca tanpa OCR.
-
-## 7. Proteksi data penting
-
-- Repositori GitHub tidak boleh mengandung proposal pribadi, PDF sumber berhak cipta, database lokal, atau API key.
-- `APP_PASSWORD` melindungi tampilan, tetapi hanya cocok untuk pemilik tunggal atau kelompok kecil yang saling percaya; belum ada pemisahan data antar pengguna.
-- Kunci `sb_secret_*` di Secrets server; **jangan** gunakan kunci anon/publishable sebagai pengganti.
-- Untuk data yang perlu kepatuhan institusional, gunakan pengaturan privasi/retensi dan infrastruktur yang lebih sesuai.
-- Saat melakukan impor dari OpenAlex, baca lisensi setiap publikasi. Aplikasi hanya mempertahankan data teks pada private DB, tidak membuka endpoint publik untuk sumber utuh.
-
-## 8. Roadmap agar lebih dekat ke sistem similarity komersial
-
-1. **Tahap MVP (sudah ada)**: upload, ingestion OpenAlex CC, korpus persisten, n-gram exact match, sumber cocok, highlight, HTML report.
-2. **Tahap berikutnya**: penelusuran kandidat dari banyak OA sumber secara otomatis, BM25/FTS5/pgvector, indeks persisten per paragraf; impor terjadwal berizin dengan antrean dan quota management.
-3. **Tahap lanjut**: paraphrase detection multilingual yang telah dievaluasi, OCR PDF scan, deteksi kutipan/sitasi berbasis struktur, antarmuka review per halaman, ekspor PDF formal, audit log.
-4. **Tahap produksi**: identitas masing-masing pengguna, row-level access per pengguna, kebijakan retensi dan penghapusan, pengujian precision/recall/F1 terhadap corpus berlabel, monitoring dan pembatasan abuse.
+Struktur proyek dipisah antara antarmuka (`app.py`, `ui_*.py`, `source_library.py`), alur dan mesin (`workflow.py`, `engine.py`, `semantic.py`), sumber data (`storage.py`, `openalex.py`, `fileparser.py`), dan laporan (`report.py`, `pdf_report.py`).
 
 ## Lisensi kode
 

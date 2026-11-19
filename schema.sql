@@ -13,5 +13,7 @@ create table if not exists public.sources (
 );
 alter table public.sources enable row level security;
 -- Sengaja tidak membuat policy SELECT/INSERT untuk anon atau authenticated.
--- Service Role (hanya di server) dapat mengakses; jangan taruh key di browser.
+-- Ekspos hanya operasi yang digunakan backend SimiCheck pada Data API.
+revoke all privileges on table public.sources from anon, authenticated;
+grant select, insert, delete on table public.sources to service_role;
 create index if not exists sources_created_at_idx on public.sources(created_at desc);

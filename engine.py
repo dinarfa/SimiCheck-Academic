@@ -1,6 +1,8 @@
 """Transparent word-coverage similarity engine; NOT Turnitin's proprietary score."""
 from __future__ import annotations
 from dataclasses import dataclass
+from collections.abc import Callable
+from time import monotonic
 from collections import defaultdict
 import re
 
@@ -35,6 +37,7 @@ class Result:
     attribution: list[str | None]
     matches: list[Match]
     source_words: dict[str, int]
+    checked_sources: int = 0
 
 
 def tokenize(text: str) -> list[Token]:
@@ -60,84 +63,112 @@ def allowed_words(text: str, tokens: list[Token], exclude_bibliography=True, exc
     return result
 
 
-def analyze(document: str, sources: list[dict], min_match_words=10,
-            exclude_bibliography=True, exclude_quotes=False, max_index_words=1_500_000) -> Result:
-    """Exact token-run matching, 10+ words by default, union coverage by source.
+class AnalysisLimit(ValueError):
+    """Batas komputasi yang aman dilaporkan kepada pengguna."""
 
-    sources: [{'id': ..., 'title': ..., 'text_content': ...}].
-    The algorithm detects near-verbatim text, not semantic paraphrases.
-    """
-    min_match_words = max(5, int(min_match_words))
+
+def analyze(document: str, sources: list[dict], min_match_words=10,
+            exclude_bibliography=True, exclude_quotes=False, max_index_words=250_000,
+            *, progress: Callable[[int], None] | None = None, deadline: float | None = None) -> Result:
+    """Cocokkan N-gram dokumen dan perluas segmen pada tiap sumber."""
+    size = max(5, int(min_match_words))
     doc = tokenize(document)
     allowed = allowed_words(document, doc, exclude_bibliography, exclude_quotes)
-    n = len(doc)
-    attr: list[str | None] = [None] * n
-    if n == 0:
-        return Result(0, 0, 0, doc, attr, [], {})
+    values = [token.value for token in doc]
+    attribution: list[str | None] = [None] * len(doc)
+    eligible = sum(allowed)
+    if eligible < size:
+        return Result(0, 0, eligible, doc, attribution, [], {})
 
-    src_list = []
-    inverted = defaultdict(list)
-    total = 0
-    for s in sources:
-        text = s.get('text_content') or ''
-        toks = tokenize(text)
-        if len(toks) < min_match_words:
+    seeds = defaultdict(list)
+    span = 0
+    for end, valid in enumerate(allowed):
+        span = span + 1 if valid else 0
+        if span >= size:
+            start = end - size + 1
+            seeds[tuple(values[start:end + 1])].append(start)
+
+    ranges = {}
+    total = checked = comparisons = extensions = 0
+    for source in sorted(sources, key=lambda row: str(row["id"])):
+        text = source.get("text_content") or ""
+        tokens = tokenize(text)
+        if len(tokens) < size:
             continue
-        if total + len(toks) > max_index_words:
-            raise ValueError('Koleksi sumber terlalu besar untuk sesi gratis. Pilih lebih sedikit jurnal.')
-        total += len(toks)
-        idx = len(src_list)
-        src_list.append((s, toks, text))
-        vals = [t.value for t in toks]
-        for j in range(len(vals) - min_match_words + 1):
-            key = tuple(vals[j:j + min_match_words])
-            # Limit common repeated phrases so one boilerplate cannot overwhelm memory.
-            if len(inverted[key]) < 15:
-                inverted[key].append((idx, j))
-
-    v = [t.value for t in doc]
-    seen = set()
-    candidates = []
-    for i in range(n - min_match_words + 1):
-        if not all(allowed[i:i + min_match_words]):
+        total += len(tokens)
+        if total > max_index_words:
+            raise AnalysisLimit("Teks sumber terlalu besar. Kurangi sumber yang dipilih.")
+        source_values = [token.value for token in tokens]
+        if source_values == values and all(allowed):
+            ranges.setdefault((0, len(doc)), (source, tokens, 0))
+            checked += 1
+            if progress:
+                progress(checked)
             continue
-        key = tuple(v[i:i + min_match_words])
-        for si, j in inverted.get(key, ()):
-            _, toks, _ = src_list[si]
-            left, right = i, i + min_match_words
-            srcleft, srcright = j, j + min_match_words
-            while left > 0 and srcleft > 0 and allowed[left - 1] and v[left - 1] == toks[srcleft - 1].value:
-                left -= 1
-                srcleft -= 1
-            while right < n and srcright < len(toks) and allowed[right] and v[right] == toks[srcright].value:
-                right += 1
-                srcright += 1
-            dedup = (si, left, right)
-            if dedup not in seen:
-                seen.add(dedup)
-                candidates.append((right - left, si, left, right, srcleft, srcright))
+        end_on_diagonal = {}
+        for source_start in range(len(tokens) - size + 1):
+            if source_start % 256 == 0 and deadline is not None and monotonic() >= deadline:
+                raise AnalysisLimit("Pencocokan melewati batas waktu. Kurangi ukuran dokumen atau sumber.")
+            key = tuple(source_values[source_start:source_start + size])
+            starts = seeds.get(key, ())
+            comparisons += len(starts)
+            if comparisons > 2_000_000:
+                raise AnalysisLimit("Terlalu banyak frasa berulang. Bagi dokumen atau kurangi jumlah sumber.")
+            for left in starts:
+                diagonal = left - source_start
+                if end_on_diagonal.get(diagonal, 0) >= left + size:
+                    continue
+                right = left + size
+                source_right = source_start + size
+                while (right < len(doc) and source_right < len(tokens) and allowed[right]
+                       and values[right] == source_values[source_right]):
+                    right += 1
+                    source_right += 1
+                    extensions += 1
+                    if extensions > 5_000_000:
+                        raise AnalysisLimit("Teks berulang melebihi batas pekerjaan. Bagi dokumen menjadi beberapa bagian.")
+                end_on_diagonal[diagonal] = right
+                span_key = (left, right)
+                if span_key not in ranges:
+                    ranges[span_key] = (source, tokens, source_start)
+                    if len(ranges) > 40_000:
+                        raise AnalysisLimit("Terlalu banyak kecocokan pendek. Naikkan minimum kata cocok.")
+        checked += 1
+        if progress:
+            progress(checked)
 
-    # Longest non-overlapping runs take priority; token coverage is never double counted.
-    candidates.sort(key=lambda z: (-z[0], z[2], z[1]))
     matches = []
     source_words = defaultdict(int)
-    for length, si, left, right, sl, sr in candidates:
-        free_positions = [p for p in range(left, right) if attr[p] is None]
-        if len(free_positions) < min_match_words:
-            continue
-        source, stoks, stext = src_list[si]
-        sid = str(source['id'])
-        for p in free_positions:
-            attr[p] = sid
-        source_words[sid] += len(free_positions)
-        matches.append(Match(
-            source_id=sid, source_title=source['title'], doc_start=left, doc_end=right,
-            source_start=sl, source_end=sr, length=length,
-            doc_excerpt=document[doc[left].start:doc[right - 1].end][:500],
-            source_excerpt=stext[stoks[sl].start:stoks[sr - 1].end][:500],
-        ))
+    covered = 0
+    ordered = sorted(ranges, key=lambda key: (key[0] - key[1], key[0]))
+    for index, (left, right) in enumerate(ordered):
+        if covered == eligible:
+            break
+        if index % 128 == 0 and deadline is not None and monotonic() >= deadline:
+            raise AnalysisLimit("Pencocokan melewati batas waktu. Kurangi ukuran dokumen atau sumber.")
+        source, tokens, source_start = ranges[left, right]
+        sid = str(source["id"])
+        cursor = left
+        while cursor < right:
+            if attribution[cursor] is not None:
+                cursor += 1
+                continue
+            end = cursor + 1
+            while end < right and attribution[end] is None:
+                end += 1
+            if end - cursor >= size:
+                sl = source_start + cursor - left
+                sr = sl + end - cursor
+                attribution[cursor:end] = [sid] * (end - cursor)
+                source_words[sid] += end - cursor
+                covered += end - cursor
+                matches.append(Match(
+                    sid, source["title"], cursor, end, sl, sr, end - cursor,
+                    document[doc[cursor].start:doc[end - 1].end][:500],
+                    source["text_content"][tokens[sl].start:tokens[sr - 1].end][:500],
+                ))
+            cursor = end
 
-    eligible = sum(allowed)
-    covered = sum(1 for a, ok in zip(attr, allowed) if ok and a is not None)
+    matches.sort(key=lambda match: (-match.length, match.doc_start))
     return Result(100 * covered / eligible if eligible else 0, covered, eligible,
-                  doc, attr, matches, dict(source_words))
+                  doc, attribution, matches, dict(source_words), checked)
