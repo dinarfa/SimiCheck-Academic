@@ -2,6 +2,7 @@
 import hashlib
 import json
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 from datetime import datetime, timezone
 import requests
@@ -21,7 +22,7 @@ class SourceStore:
         self.local_path = local_path
         self.remote = bool(url and key)
         if not self.remote:
-            with sqlite3.connect(self.local_path) as db:
+            with closing(sqlite3.connect(self.local_path)) as db, db:
                 db.execute(SCHEMA)
 
     def _request(self, method, path, **kwargs):
@@ -50,7 +51,7 @@ class SourceStore:
         if self.remote:
             self._request('POST', '?on_conflict=id', json=row)
         else:
-            with sqlite3.connect(self.local_path) as db:
+            with closing(sqlite3.connect(self.local_path)) as db, db:
                 db.execute('''INSERT INTO sources (id,title,origin,doi,license,source_url,text_content,word_count,created_at)
                      VALUES (:id,:title,:origin,:doi,:license,:source_url,:text_content,:word_count,:created_at)
                      ON CONFLICT(id) DO UPDATE SET title=excluded.title, source_url=excluded.source_url''', row)
@@ -60,7 +61,7 @@ class SourceStore:
         fields = '*' if include_text else 'id,title,origin,doi,license,source_url,word_count,created_at'
         if self.remote:
             return self._request('GET', f'?select={fields}&order=created_at.desc&limit={int(limit)}')
-        with sqlite3.connect(self.local_path) as db:
+        with closing(sqlite3.connect(self.local_path)) as db, db:
             db.row_factory = sqlite3.Row
             rows = db.execute(f'SELECT {fields} FROM sources ORDER BY created_at DESC LIMIT ?', (limit,)).fetchall()
         return [dict(r) for r in rows]
@@ -69,5 +70,5 @@ class SourceStore:
         if self.remote:
             self._request('DELETE', f'?id=eq.{sid}')
         else:
-            with sqlite3.connect(self.local_path) as db:
+            with closing(sqlite3.connect(self.local_path)) as db, db:
                 db.execute('DELETE FROM sources WHERE id = ?', (sid,))
